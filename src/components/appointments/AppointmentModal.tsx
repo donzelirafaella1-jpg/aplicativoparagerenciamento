@@ -13,6 +13,7 @@ import {
 import { useLogistics } from '../../context/LogisticsContext';
 import { Appointment, Priority } from '../../types/logistics';
 import { validateOperationalTimeWindow, validateYardCapacity } from '../../lib/logistics-engine';
+import { logisticsService } from '../../services/logistics-service';
 
 export const AppointmentModal: React.FC = () => {
   const {
@@ -104,37 +105,25 @@ export const AppointmentModal: React.FC = () => {
       setWindowError(null);
     }
 
-    // 2. Query capacity and suggested slots from backend
-    const checkBackend = async () => {
-      try {
-        const res = await fetch('/api/appointments/check-capacity', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            date,
-            scheduledTime,
-            estStayMinutes: Number(estStayMinutes),
-            excludeId: selectedAppointmentForEdit?.id,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          if (data.message) {
-            setCapacityError(data.message);
-          }
-          if (data.suggestions) {
-            setSuggestedSlots(data.suggestions);
-          }
-        } else {
-          setCapacityError(null);
-          setSuggestedSlots([]);
-        }
-      } catch (err) {
-        console.error('Erro ao checar capacidade:', err);
-      }
-    };
+    // 2. Query capacity and suggested slots
+    const checkCap = logisticsService.checkCapacity(
+      date,
+      scheduledTime,
+      Number(estStayMinutes),
+      selectedAppointmentForEdit?.id
+    );
 
-    checkBackend();
+    if (!checkCap.valid) {
+      if (checkCap.message) {
+        setCapacityError(checkCap.message);
+      }
+      if (checkCap.suggestions) {
+        setSuggestedSlots(checkCap.suggestions);
+      }
+    } else {
+      setCapacityError(null);
+      setSuggestedSlots([]);
+    }
   }, [scheduledTime, estStayMinutes, date, isAppointmentModalOpen, selectedAppointmentForEdit, config]);
 
   if (!isAppointmentModalOpen) return null;

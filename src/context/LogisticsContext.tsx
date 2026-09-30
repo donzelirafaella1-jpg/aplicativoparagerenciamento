@@ -15,6 +15,7 @@ import {
 } from '../types/logistics';
 import { DEFAULT_CONFIG, calculateOperationalKPIs } from '../lib/logistics-engine';
 import { TODAY_DATE } from '../data/seed-data';
+import { logisticsService } from '../services/logistics-service';
 
 export type ActiveTab =
   | 'dashboard'
@@ -107,18 +108,17 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     company: 'Move Log',
   });
 
-  // Operational State
-  const [config, setConfig] = useState<OperationalConfig>(DEFAULT_CONFIG);
-  const [appointments, setAppointments] = useState<Appointment[]>([]);
-  const [yardSpots, setYardSpots] = useState<YardSpot[]>([]);
-  const [docks, setDocks] = useState<Dock[]>([]);
-  const [waitingQueue, setWaitingQueue] = useState<WaitingQueueItem[]>([]);
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
-  const [drivers, setDrivers] = useState<Driver[]>([]);
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [metrics, setMetrics] = useState<OperationalMetrics>(() =>
-    calculateOperationalKPIs([], TODAY_DATE, DEFAULT_CONFIG)
-  );
+  // Operational State loaded from LogisticsService
+  const initial = logisticsService.getState(TODAY_DATE);
+  const [config, setConfig] = useState<OperationalConfig>(initial.config);
+  const [appointments, setAppointments] = useState<Appointment[]>(initial.appointments);
+  const [yardSpots, setYardSpots] = useState<YardSpot[]>(initial.yardSpots);
+  const [docks, setDocks] = useState<Dock[]>(initial.docks);
+  const [waitingQueue, setWaitingQueue] = useState<WaitingQueueItem[]>(initial.waitingQueue);
+  const [carriers, setCarriers] = useState<Carrier[]>(initial.carriers);
+  const [drivers, setDrivers] = useState<Driver[]>(initial.drivers);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(initial.auditLogs);
+  const [metrics, setMetrics] = useState<OperationalMetrics>(initial.metrics);
 
   // Modals
   const [isAppointmentModalOpen, setIsAppointmentModalOpen] = useState(false);
@@ -161,18 +161,41 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const refreshState = useCallback(async () => {
     try {
-      const res = await fetch(`/api/state?date=${selectedDate}`);
-      if (!res.ok) throw new Error('Falha ao sincronizar dados');
-      const data = await res.json();
-      setConfig(data.config || DEFAULT_CONFIG);
-      setAppointments(data.appointments || []);
-      setYardSpots(data.yardSpots || []);
-      setDocks(data.docks || []);
-      setWaitingQueue(data.waitingQueue || []);
-      setCarriers(data.carriers || []);
-      setDrivers(data.drivers || []);
-      setAuditLogs(data.auditLogs || []);
-      setMetrics(data.metrics || calculateOperationalKPIs(data.appointments || [], selectedDate, data.config || DEFAULT_CONFIG));
+      // 1. Fetch from centralized logisticsService
+      const state = logisticsService.getState(selectedDate);
+      setConfig(state.config || DEFAULT_CONFIG);
+      setAppointments([...state.appointments]);
+      setYardSpots([...state.yardSpots]);
+      setDocks([...state.docks]);
+      setWaitingQueue([...state.waitingQueue]);
+      setCarriers([...state.carriers]);
+      setDrivers([...state.drivers]);
+      setAuditLogs([...state.auditLogs]);
+      setMetrics(state.metrics);
+
+      // 2. Also optionally try API if running fullstack Express
+      try {
+        const res = await fetch(`/api/state?date=${selectedDate}`);
+        if (res.ok) {
+          const contentType = res.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const data = await res.json();
+            if (data && data.appointments) {
+              setConfig(data.config || state.config);
+              setAppointments(data.appointments);
+              setYardSpots(data.yardSpots);
+              setDocks(data.docks);
+              setWaitingQueue(data.waitingQueue);
+              setCarriers(data.carriers);
+              setDrivers(data.drivers);
+              setAuditLogs(data.auditLogs);
+              setMetrics(data.metrics);
+            }
+          }
+        }
+      } catch (apiErr) {
+        // Fallback to logisticsService
+      }
     } catch (err) {
       console.error('[Move Log TMS] Erro na sincronização:', err);
     } finally {
@@ -182,84 +205,90 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   useEffect(() => {
     refreshState();
-    const interval = setInterval(refreshState, 15000); // Poll every 15s
+    const interval = setInterval(refreshState, 15000);
     return () => clearInterval(interval);
   }, [refreshState]);
 
   const createAppointment = async (formData: any) => {
     try {
-      const res = await fetch('/api/appointments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...formData,
-          userName: currentUser.name,
-          userRole: currentUser.role,
-        }),
+      const res = logisticsService.createAppointment({
+        ...formData,
+        userName: currentUser.name,
+        userRole: currentUser.role,
       });
 
-      const data = await res.json();
-      if (!res.ok) {
+      if (!res.success) {
         return {
           success: false,
-          error: data.error || data.message || 'Falha ao criar agendamento.',
-          suggestions: data.suggestions || [],
+          error: res.error || 'Falha ao criar agendamento.',
+          suggestions: res.suggestions || [],
         };
       }
 
-      addToast('success', 'Agendamento Confirmado', `Veículo ${data.plate} agendado com sucesso para ${data.scheduledTime}.`);
+      addToast('success', 'Agendamento Confirmado', `Veículo ${res.appointment?.plate} agendado com sucesso para ${res.appointment?.scheduledTime}.`);
       await refreshState();
+
+      // Background API sync if available
+      fetch('/api/appointments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...formData, userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Erro de conexão' };
+      return { success: false, error: err.message || 'Erro ao processar' };
     }
   };
 
   const updateAppointment = async (id: string, formData: any) => {
     try {
-      const res = await fetch(`/api/appointments/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...formData,
-          userName: currentUser.name,
-          userRole: currentUser.role,
-        }),
+      const res = logisticsService.updateAppointment(id, {
+        ...formData,
+        userName: currentUser.name,
+        userRole: currentUser.role,
       });
 
-      const data = await res.json();
-      if (!res.ok) {
+      if (!res.success) {
         return {
           success: false,
-          error: data.error || data.message || 'Falha ao atualizar agendamento.',
-          suggestions: data.suggestions || [],
+          error: res.error || 'Falha ao atualizar agendamento.',
+          suggestions: res.suggestions || [],
         };
       }
 
-      addToast('success', 'Agendamento Atualizado', `Veículo ${data.plate} readequado para ${data.scheduledTime}.`);
+      addToast('success', 'Agendamento Atualizado', `Veículo ${res.appointment?.plate} readequado para ${res.appointment?.scheduledTime}.`);
       await refreshState();
+
+      fetch(`/api/appointments/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...formData, userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Erro de conexão' };
+      return { success: false, error: err.message || 'Erro ao processar' };
     }
   };
 
   const cancelAppointment = async (id: string) => {
     try {
-      const res = await fetch(`/api/appointments/${id}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userName: currentUser.name, userRole: currentUser.role }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        addToast('error', 'Erro ao Cancelar', data.error || 'Não foi possível cancelar.');
+      const success = logisticsService.cancelAppointment(id, currentUser.name);
+      if (!success) {
+        addToast('error', 'Erro ao Cancelar', 'Não foi possível cancelar o agendamento.');
         return false;
       }
 
       addToast('info', 'Agendamento Cancelado', 'Agendamento cancelado e recursos liberados no Centro de Distribuição.');
       await refreshState();
+
+      fetch(`/api/appointments/${id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return true;
     } catch (err: any) {
       addToast('error', 'Erro', err.message || 'Falha na requisição.');
@@ -269,7 +298,26 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const performCheckin = async (appointmentId: string, realArrivalTime: string, notes?: string) => {
     try {
-      const res = await fetch('/api/checkin', {
+      const res = logisticsService.performCheckin(
+        appointmentId,
+        realArrivalTime,
+        notes,
+        currentUser.name,
+        currentUser.role
+      );
+
+      if (!res.success) {
+        return { success: false, error: res.error || 'Falha ao registrar check-in' };
+      }
+
+      addToast(
+        res.delta && res.delta.delayMinutes > 15 ? 'warning' : 'success',
+        'Check-in Realizado com Sucesso',
+        `${res.delta?.message} Direcionado para Vaga ${res.yardSpot?.spotNumber}.`
+      );
+      await refreshState();
+
+      fetch('/api/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -279,41 +327,31 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           userName: currentUser.name,
           userRole: currentUser.role,
         }),
-      });
+      }).catch(() => {});
 
-      const data = await res.json();
-      if (!res.ok) {
-        return { success: false, error: data.error || 'Falha ao registrar check-in' };
-      }
-
-      addToast(
-        data.delta.delayMinutes > 15 ? 'warning' : 'success',
-        'Check-in Realizado com Sucesso',
-        `${data.delta.message} Direcionado para Vaga ${data.yardSpot.spotNumber}.`
-      );
-      await refreshState();
-      return { success: true, message: data.delta.message };
+      return { success: true, message: res.delta?.message };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Erro ao conectar ao servidor.' };
+      return { success: false, error: err.message || 'Erro ao processar check-in.' };
     }
   };
 
   const allocateDock = async (dockId: number, appointmentId: string) => {
     try {
-      const res = await fetch('/api/docks/allocate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dockId, appointmentId, userName: currentUser.name, userRole: currentUser.role }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        addToast('error', 'Falha na Alocação', data.error || 'Não foi possível alocar a doca.');
+      const res = logisticsService.allocateDock(dockId, appointmentId, currentUser.name, currentUser.role);
+      if (!res.success) {
+        addToast('error', 'Falha na Alocação', res.error || 'Não foi possível alocar a doca.');
         return false;
       }
 
-      addToast('success', 'Doca Alocada', `Veículo posicionado na Doca ${data.dock.dockNumber}. Início do descarregamento.`);
+      addToast('success', 'Doca Alocada', `Veículo posicionado na Doca ${res.dock?.dockNumber}. Início do descarregamento.`);
       await refreshState();
+
+      fetch('/api/docks/allocate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dockId, appointmentId, userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return true;
     } catch (err: any) {
       addToast('error', 'Erro', err.message);
@@ -323,33 +361,34 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const finishUnload = async (dockId: number) => {
     try {
-      const res = await fetch('/api/docks/finish-unload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dockId, userName: currentUser.name, userRole: currentUser.role }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        addToast('error', 'Erro', data.error || 'Falha ao finalizar descarregamento.');
+      const res = logisticsService.finishUnload(dockId, currentUser.name, currentUser.role);
+      if (!res.success) {
+        addToast('error', 'Erro', res.error || 'Falha ao finalizar descarregamento.');
         return false;
       }
 
       addToast(
         'success',
         'Descarregamento Finalizado',
-        `Doca ${data.dock.dockNumber} liberada e veículo encaminhado para saída do CD.`
+        `Doca ${res.dock?.dockNumber} liberada e veículo encaminhado para saída do CD.`
       );
 
-      if (data.nextRecommendedInQueue) {
+      if (res.nextRecommendedInQueue) {
         addToast(
           'info',
           'Próximo da Fila de Espera',
-          `Veículo ${data.nextRecommendedInQueue.plate} (${data.nextRecommendedInQueue.carrier}) recomendado para a Doca ${data.dock.dockNumber}.`
+          `Veículo ${res.nextRecommendedInQueue.plate} (${res.nextRecommendedInQueue.carrier}) recomendado para a Doca ${res.dock?.dockNumber}.`
         );
       }
 
       await refreshState();
+
+      fetch('/api/docks/finish-unload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dockId, userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return true;
     } catch (err: any) {
       addToast('error', 'Erro', err.message);
@@ -359,20 +398,21 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const moveYardSpot = async (fromSpotId: number, toSpotId: number) => {
     try {
-      const res = await fetch('/api/yard/move', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromSpotId, toSpotId, userName: currentUser.name, userRole: currentUser.role }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        addToast('error', 'Erro ao Mover', data.error || 'Não foi possível mover o veículo.');
+      const res = logisticsService.moveYardSpot(fromSpotId, toSpotId, currentUser.name, currentUser.role);
+      if (!res.success) {
+        addToast('error', 'Erro ao Mover', res.error || 'Não foi possível mover o veículo.');
         return false;
       }
 
-      addToast('success', 'Pátio Atualizado', `Veículo transferido para vaga ${data.toSpot.spotNumber}.`);
+      addToast('success', 'Pátio Atualizado', `Veículo transferido para vaga ${res.toSpot?.spotNumber}.`);
       await refreshState();
+
+      fetch('/api/yard/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromSpotId, toSpotId, userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return true;
     } catch (err: any) {
       addToast('error', 'Erro', err.message);
@@ -382,13 +422,8 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const loadOptimizationPreview = async () => {
     try {
-      const res = await fetch('/api/optimize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: selectedDate }),
-      });
-      const data = await res.json();
-      setOptimizationPreview(data);
+      const preview = logisticsService.getOptimizationPreview(selectedDate);
+      setOptimizationPreview(preview);
       setIsOptimizeModalOpen(true);
     } catch (err: any) {
       addToast('error', 'Falha ao Calcular Otimização', err.message);
@@ -397,29 +432,26 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const applyOptimization = async () => {
     try {
-      const res = await fetch('/api/optimize/apply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          date: selectedDate,
-          userName: currentUser.name,
-          userRole: currentUser.role,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        addToast('error', 'Erro', data.error || 'Falha ao aplicar otimização.');
+      const res = logisticsService.applyOptimization(selectedDate, currentUser.name, currentUser.role);
+      if (!res.success) {
+        addToast('error', 'Erro', 'Falha ao aplicar otimização.');
         return false;
       }
 
       addToast(
         'success',
         'Otimização Aplicada com Sucesso!',
-        `${data.appliedCount} caminhões reposicionados. Pico de pátio estabilizado.`
+        `${res.appliedCount} caminhões reposicionados. Pico de pátio estabilizado.`
       );
       setIsOptimizeModalOpen(false);
       await refreshState();
+
+      fetch('/api/optimize/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: selectedDate, userName: currentUser.name, userRole: currentUser.role }),
+      }).catch(() => {});
+
       return true;
     } catch (err: any) {
       addToast('error', 'Erro', err.message);
@@ -429,24 +461,17 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const updateConfig = async (newConfig: OperationalConfig) => {
     try {
-      const res = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...newConfig,
-          userName: currentUser.name,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        addToast('error', 'Erro', 'Falha ao salvar configurações.');
-        return false;
-      }
-
-      setConfig(data.config);
+      const res = logisticsService.updateConfig(newConfig, currentUser.name);
+      setConfig(res.config);
       addToast('success', 'Configurações Atualizadas', 'Parâmetros operacionais do CD Move Log salvos.');
       await refreshState();
+
+      fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...newConfig, userName: currentUser.name }),
+      }).catch(() => {});
+
       return true;
     } catch (err: any) {
       addToast('error', 'Erro', err.message);
@@ -456,11 +481,11 @@ export const LogisticsProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const resetSeedData = async () => {
     try {
-      const res = await fetch('/api/reset', { method: 'POST' });
-      if (res.ok) {
-        addToast('info', 'Dados Reinicializados', 'Os 32 caminhões e estado inicial do CD Move Log foram restaurados.');
-        await refreshState();
-      }
+      logisticsService.reset();
+      addToast('info', 'Dados Reinicializados', 'Os 32 caminhões e estado inicial do CD Move Log foram restaurados.');
+      await refreshState();
+
+      fetch('/api/reset', { method: 'POST' }).catch(() => {});
     } catch (err: any) {
       addToast('error', 'Erro', err.message);
     }

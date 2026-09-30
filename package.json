@@ -1,14 +1,14 @@
 {
-  "name": "react-example",
+  "name": "move-log-tms",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
-    "start": "tsx server.ts",
-    "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "preview": "vite preview --port=3000 --host=0.0.0.0",
+    "start": "node server.ts",
+    "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

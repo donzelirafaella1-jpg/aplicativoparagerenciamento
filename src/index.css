@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .bg-stripes-amber {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      rgba(245, 158, 11, 0.12),
+      rgba(245, 158, 11, 0.12) 10px,
+      rgba(245, 158, 11, 0.22) 10px,
+      rgba(245, 158, 11, 0.22) 20px
+    );
+  }
+}
